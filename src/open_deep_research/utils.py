@@ -1,8 +1,10 @@
 """Utility functions and helpers for the Deep Research agent."""
 
 import asyncio
+import json
 import logging
 import os
+import re
 import warnings
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -83,12 +85,18 @@ async def tavily_search(
     
     # Initialize summarization model with retry logic
     model_api_key = get_api_key_for_model(configurable.summarization_model, config)
-    summarization_model = init_chat_model(
-        model=configurable.summarization_model,
-        max_tokens=configurable.summarization_model_max_tokens,
-        api_key=model_api_key,
-        tags=["langsmith:nostream"]
-    ).with_structured_output(Summary).with_retry(
+    base_url = get_base_url_for_model(configurable.summarization_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.summarization_model)
+    summarization_model_kwargs = {
+        "model": normalized_model_name,
+        "max_tokens": configurable.summarization_model_max_tokens,
+        "api_key": model_api_key,
+        "tags": ["langsmith:nostream"]
+    }
+    if base_url:
+        summarization_model_kwargs["base_url"] = base_url
+    summarization_model = init_chat_model(**summarization_model_kwargs).with_structured_output(Summary).with_retry(
         stop_after_attempt=configurable.max_structured_output_retries
     )
     
@@ -195,11 +203,29 @@ async def summarize_webpage(model: BaseChatModel, webpage_content: str) -> str:
             timeout=60.0  # 60 second timeout for summarization
         )
         
-        # Format the summary with structured sections
-        formatted_summary = (
-            f"<summary>\n{summary.summary}\n</summary>\n\n"
-            f"<key_excerpts>\n{summary.key_excerpts}\n</key_excerpts>"
-        )
+        # Check if summary is a structured output object or plain text
+        if hasattr(summary, 'summary') and hasattr(summary, 'key_excerpts'):
+            # Structured output succeeded
+            formatted_summary = (
+                f"<summary>\n{summary.summary}\n</summary>\n\n"
+                f"<key_excerpts>\n{summary.key_excerpts}\n</key_excerpts>"
+            )
+        else:
+            # Fallback: Try to parse JSON from response
+            parsed_summary = parse_structured_output_fallback(
+                str(summary.content) if hasattr(summary, 'content') else str(summary),
+                Summary,
+                None
+            )
+            if parsed_summary:
+                formatted_summary = (
+                    f"<summary>\n{parsed_summary.summary}\n</summary>\n\n"
+                    f"<key_excerpts>\n{parsed_summary.key_excerpts}\n</key_excerpts>"
+                )
+            else:
+                # Last resort: Use the raw response as summary
+                raw_content = str(summary.content) if hasattr(summary, 'content') else str(summary)
+                formatted_summary = f"<summary>\n{raw_content}\n</summary>\n\n<key_excerpts>\n{raw_content[:500]}\n</key_excerpts>"
         
         return formatted_summary
         
@@ -539,6 +565,13 @@ async def get_search_tool(search_api: SearchAPI):
     """
     if search_api == SearchAPI.ANTHROPIC:
         # Anthropic's native web search with usage limits
+        # NOTE: Native web search is only supported by Anthropic models
+        # For vLLM/Qwen models, use TAVILY instead
+        warnings.warn(
+            "Anthropic native web search is selected, but this requires an Anthropic model. "
+            "For vLLM/Qwen models, use TAVILY search API instead.",
+            UserWarning
+        )
         return [{
             "type": "web_search_20250305", 
             "name": "web_search", 
@@ -547,10 +580,18 @@ async def get_search_tool(search_api: SearchAPI):
         
     elif search_api == SearchAPI.OPENAI:
         # OpenAI's web search preview functionality
+        # NOTE: Native web search is only supported by OpenAI models
+        # For vLLM/Qwen models, use TAVILY instead
+        warnings.warn(
+            "OpenAI native web search is selected, but this requires an OpenAI model. "
+            "For vLLM/Qwen models, use TAVILY search API instead.",
+            UserWarning
+        )
         return [{"type": "web_search_preview"}]
         
     elif search_api == SearchAPI.TAVILY:
         # Configure Tavily search tool with metadata
+        # Tavily works with any model including vLLM/Qwen
         search_tool = tavily_search
         search_tool.metadata = {
             **(search_tool.metadata or {}), 
@@ -678,15 +719,23 @@ def is_token_limit_exceeded(exception: Exception, model_name: str = None) -> boo
     provider = None
     if model_name:
         model_str = str(model_name).lower()
-        if model_str.startswith('openai:'):
-            provider = 'openai'
+        if model_str.startswith('vllm:'):
+            provider = 'vllm'
+        elif model_str.startswith('openai:'):
+            # Check if this is actually a vLLM model (if VLLM_BASE_URL is set)
+            if os.getenv("VLLM_BASE_URL"):
+                provider = 'vllm'
+            else:
+                provider = 'openai'
         elif model_str.startswith('anthropic:'):
             provider = 'anthropic'
         elif model_str.startswith('gemini:') or model_str.startswith('google:'):
             provider = 'gemini'
     
     # Step 2: Check provider-specific token limit patterns
-    if provider == 'openai':
+    if provider == 'vllm':
+        return _check_vllm_token_limit(exception, error_str)
+    elif provider == 'openai':
         return _check_openai_token_limit(exception, error_str)
     elif provider == 'anthropic':
         return _check_anthropic_token_limit(exception, error_str)
@@ -695,6 +744,7 @@ def is_token_limit_exceeded(exception: Exception, model_name: str = None) -> boo
     
     # Step 3: If provider unknown, check all providers
     return (
+        _check_vllm_token_limit(exception, error_str) or
         _check_openai_token_limit(exception, error_str) or
         _check_anthropic_token_limit(exception, error_str) or
         _check_gemini_token_limit(exception, error_str)
@@ -784,6 +834,139 @@ def _check_gemini_token_limit(exception: Exception, error_str: str) -> bool:
     
     return False
 
+def _check_vllm_token_limit(exception: Exception, error_str: str) -> bool:
+    """Check if exception indicates vLLM/Qwen token limit exceeded."""
+    # Analyze exception metadata
+    exception_type = str(type(exception))
+    class_name = exception.__class__.__name__
+    module_name = getattr(exception.__class__, '__module__', '')
+    
+    # vLLM typically uses OpenAI-compatible API, so it may throw OpenAI-style errors
+    # Check if this is an OpenAI-compatible exception (which vLLM uses)
+    is_openai_compatible = (
+        'openai' in exception_type.lower() or 
+        'openai' in module_name.lower() or
+        'httpx' in exception_type.lower() or
+        'httpx' in module_name.lower()
+    )
+    
+    # Check for typical token limit error types
+    is_request_error = class_name in ['BadRequestError', 'InvalidRequestError', 'HTTPStatusError']
+    
+    if is_openai_compatible and is_request_error:
+        # Look for token-related keywords in error message
+        token_keywords = [
+            'token', 'context', 'length', 'maximum context', 'reduce',
+            'context_length_exceeded', 'max_tokens', 'input length',
+            'sequence length', 'exceeds maximum', 'too long'
+        ]
+        if any(keyword in error_str for keyword in token_keywords):
+            return True
+    
+    # Check for specific error codes (vLLM may use OpenAI-compatible error codes)
+    if hasattr(exception, 'code') and hasattr(exception, 'type'):
+        error_code = getattr(exception, 'code', '')
+        error_type = getattr(exception, 'type', '')
+        
+        if (error_code == 'context_length_exceeded' or
+            error_type == 'invalid_request_error' or
+            'context_length' in str(error_code).lower()):
+            return True
+    
+    # Check for HTTP status codes that might indicate token limit issues
+    if hasattr(exception, 'status_code'):
+        status_code = getattr(exception, 'status_code', None)
+        # 400 Bad Request often indicates token limit issues
+        if status_code == 400 and any(keyword in error_str for keyword in ['token', 'context', 'length']):
+            return True
+    
+    # Check for vLLM-specific error patterns
+    if 'vllm' in error_str or 'qwen' in error_str:
+        if any(keyword in error_str for keyword in ['token', 'context', 'length', 'exceeded']):
+            return True
+    
+    return False
+
+##########################
+# Structured Output Fallback Utils
+##########################
+
+def parse_json_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Extract and parse JSON from text, handling various formats.
+    
+    This function attempts to extract JSON from text that may contain
+    markdown code blocks, extra text, or other formatting.
+    
+    Args:
+        text: Text that may contain JSON
+        
+    Returns:
+        Parsed JSON dictionary if found, None otherwise
+    """
+    if not text:
+        return None
+    
+    # Try to find JSON in markdown code blocks
+    json_patterns = [
+        r'```json\s*(\{.*?\})\s*```',  # JSON in markdown code block
+        r'```\s*(\{.*?\})\s*```',       # JSON in generic code block
+        r'(\{.*\})',                     # Any JSON object
+    ]
+    
+    for pattern in json_patterns:
+        matches = re.findall(pattern, text, re.DOTALL)
+        if matches:
+            try:
+                return json.loads(matches[0])
+            except json.JSONDecodeError:
+                continue
+    
+    # Try to parse the entire text as JSON
+    try:
+        return json.loads(text.strip())
+    except json.JSONDecodeError:
+        pass
+    
+    return None
+
+def parse_structured_output_fallback(
+    response_content: str, 
+    output_class: type,
+    model_name: str = None
+) -> Optional[Any]:
+    """Parse structured output from model response with fallback to JSON parsing.
+    
+    This function attempts to parse structured output when with_structured_output
+    fails or is not supported by the model.
+    
+    Args:
+        response_content: The raw text response from the model
+        output_class: The Pydantic model class to parse into
+        model_name: Optional model name for logging
+        
+    Returns:
+        Parsed output instance if successful, None otherwise
+    """
+    try:
+        # Try to extract JSON from the response
+        json_data = parse_json_from_text(response_content)
+        
+        if json_data:
+            # Create instance from parsed JSON
+            return output_class(**json_data)
+        else:
+            logging.warning(
+                f"Could not extract JSON from model response for {output_class.__name__}. "
+                f"Model: {model_name or 'unknown'}"
+            )
+            return None
+    except Exception as e:
+        logging.error(
+            f"Error parsing structured output for {output_class.__name__}: {e}. "
+            f"Model: {model_name or 'unknown'}"
+        )
+        return None
+
 # NOTE: This may be out of date or not applicable to your models. Please update this as needed.
 MODEL_TOKEN_LIMITS = {
     "openai:gpt-4.1-mini": 1047576,
@@ -826,6 +1009,13 @@ MODEL_TOKEN_LIMITS = {
     "bedrock:us.anthropic.claude-sonnet-4-20250514-v1:0": 200000,
     "bedrock:us.anthropic.claude-opus-4-20250514-v1:0": 200000,
     "anthropic.claude-opus-4-1-20250805-v1:0": 200000,
+    # vLLM models
+    "vllm:Qwen2.5-7B-Instruct": 32768,
+    "vllm:qwen2.5-7b-instruct": 32768,
+    "vllm:qwen-7b-instruct": 8192,  # For custom served-model-name
+    "openai:Qwen2.5-7B-Instruct": 32768,  # For OpenAI-compatible API format
+    "openai:qwen2.5-7b-instruct": 32768,  # For OpenAI-compatible API format
+    "openai:qwen-7b-instruct": 8192,  # For custom served-model-name with OpenAI format
 }
 
 def get_model_token_limit(model_string):
@@ -889,27 +1079,97 @@ def get_config_value(value):
     else:
         return value.value
 
+def normalize_model_name_for_langchain(model_name: str) -> str:
+    """Normalize model name for LangChain compatibility.
+    
+    Converts vllm: prefix to openai: prefix since vLLM uses OpenAI-compatible API.
+    LangChain doesn't recognize 'vllm:' prefix, so we need to use 'openai:' with base_url.
+    
+    Also handles served-model-name mapping if VLLM_SERVED_MODEL_NAME is set.
+    
+    Args:
+        model_name: Original model name (e.g., "vllm:Qwen2.5-7B-Instruct" or "vllm:qwen-7b-instruct")
+        
+    Returns:
+        Normalized model name for LangChain (e.g., "openai:qwen-7b-instruct" if served-model-name is set)
+    """
+    if model_name.lower().startswith("vllm:"):
+        # Check if VLLM_SERVED_MODEL_NAME is set (matches --served-model-name)
+        served_model_name = os.getenv("VLLM_SERVED_MODEL_NAME")
+        if served_model_name:
+            # Use the served-model-name directly
+            return f"openai:{served_model_name}"
+        else:
+            # Convert vllm: to openai: and extract model name
+            # Remove vllm: prefix and use the rest as model name
+            model_name_without_prefix = model_name.replace("vllm:", "", 1)
+            return f"openai:{model_name_without_prefix}"
+    return model_name
+
+def get_base_url_for_model(model_name: str, config: RunnableConfig):
+    """Get base URL for a specific model (for vLLM or other local servers)."""
+    model_name_lower = model_name.lower()
+    
+    # Check if this is a vLLM model (explicit vllm: prefix or if VLLM_BASE_URL is set)
+    if model_name_lower.startswith("vllm:"):
+        # For vLLM, use the VLLM_BASE_URL environment variable
+        # Default to localhost:8000/v1 if not set
+        return os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+    
+    # For OpenAI-compatible models that might be vLLM, check if VLLM_BASE_URL is set
+    # This allows using "openai:Qwen2.5-7B-Instruct" format with vLLM
+    if model_name_lower.startswith("openai:") and os.getenv("VLLM_BASE_URL"):
+        return os.getenv("VLLM_BASE_URL", "http://localhost:8000/v1")
+    
+    # For other models, check config first
+    should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
+    if should_get_from_config.lower() == "true":
+        api_config = config.get("configurable", {}).get("apiConfig", {})
+        if api_config and "base_url" in api_config:
+            return api_config.get("base_url")
+    
+    return None
+
 def get_api_key_for_model(model_name: str, config: RunnableConfig):
     """Get API key for a specific model from environment or config."""
     should_get_from_config = os.getenv("GET_API_KEYS_FROM_CONFIG", "false")
-    model_name = model_name.lower()
+    model_name_lower = model_name.lower()
+    
+    # Check if this is a vLLM model (explicit vllm: prefix or if VLLM_BASE_URL is set)
+    # vLLM models typically don't need API keys (or use a dummy key)
+    is_vllm_model = (
+        model_name_lower.startswith("vllm:") or 
+        (model_name_lower.startswith("openai:") and os.getenv("VLLM_BASE_URL"))
+    )
+    
+    if is_vllm_model:
+        # vLLM may not require an API key, but some implementations expect one
+        # Return a dummy key or None based on vLLM server configuration
+        if should_get_from_config.lower() == "true":
+            # Check config first for vLLM API key
+            api_keys = config.get("configurable", {}).get("apiKeys", {})
+            if api_keys and "VLLM_API_KEY" in api_keys:
+                return api_keys.get("VLLM_API_KEY")
+        # Fall back to environment variable or default
+        return os.getenv("VLLM_API_KEY", "EMPTY")  # Some vLLM servers accept any key
+    
     if should_get_from_config.lower() == "true":
         api_keys = config.get("configurable", {}).get("apiKeys", {})
         if not api_keys:
             return None
-        if model_name.startswith("openai:"):
+        if model_name_lower.startswith("openai:"):
             return api_keys.get("OPENAI_API_KEY")
-        elif model_name.startswith("anthropic:"):
+        elif model_name_lower.startswith("anthropic:"):
             return api_keys.get("ANTHROPIC_API_KEY")
-        elif model_name.startswith("google"):
+        elif model_name_lower.startswith("google"):
             return api_keys.get("GOOGLE_API_KEY")
         return None
     else:
-        if model_name.startswith("openai:"): 
+        if model_name_lower.startswith("openai:"): 
             return os.getenv("OPENAI_API_KEY")
-        elif model_name.startswith("anthropic:"):
+        elif model_name_lower.startswith("anthropic:"):
             return os.getenv("ANTHROPIC_API_KEY")
-        elif model_name.startswith("google"):
+        elif model_name_lower.startswith("google"):
             return os.getenv("GOOGLE_API_KEY")
         return None
 

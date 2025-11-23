@@ -81,11 +81,11 @@ class Configuration(BaseModel):
             "x_oap_ui_config": {
                 "type": "select",
                 "default": "tavily",
-                "description": "Search API to use for research. NOTE: Make sure your Researcher Model supports the selected search API.",
+                "description": "Search API to use for research. NOTE: For vLLM/Qwen models, use TAVILY. Native web search (OpenAI/Anthropic) only works with their respective models.",
                 "options": [
-                    {"label": "Tavily", "value": SearchAPI.TAVILY.value},
-                    {"label": "OpenAI Native Web Search", "value": SearchAPI.OPENAI.value},
-                    {"label": "Anthropic Native Web Search", "value": SearchAPI.ANTHROPIC.value},
+                    {"label": "Tavily (Recommended for vLLM/Qwen)", "value": SearchAPI.TAVILY.value},
+                    {"label": "OpenAI Native Web Search (OpenAI models only)", "value": SearchAPI.OPENAI.value},
+                    {"label": "Anthropic Native Web Search (Anthropic models only)", "value": SearchAPI.ANTHROPIC.value},
                     {"label": "None", "value": SearchAPI.NONE.value}
                 ]
             }
@@ -119,11 +119,11 @@ class Configuration(BaseModel):
     )
     # Model Configuration
     summarization_model: str = Field(
-        default="openai:gpt-4.1-mini",
+        default="vllm:Qwen2.5-7B-Instruct",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1-mini",
+                "default": "vllm:Qwen2.5-7B-Instruct",
                 "description": "Model for summarizing research results from Tavily search results"
             }
         }
@@ -151,11 +151,11 @@ class Configuration(BaseModel):
         }
     )
     research_model: str = Field(
-        default="openai:gpt-4.1",
+        default="vllm:Qwen2.5-7B-Instruct",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "vllm:Qwen2.5-7B-Instruct",
                 "description": "Model for conducting research. NOTE: Make sure your Researcher Model supports the selected search API."
             }
         }
@@ -171,11 +171,11 @@ class Configuration(BaseModel):
         }
     )
     compression_model: str = Field(
-        default="openai:gpt-4.1",
+        default="vllm:Qwen2.5-7B-Instruct",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "vllm:Qwen2.5-7B-Instruct",
                 "description": "Model for compressing research findings from sub-agents. NOTE: Make sure your Compression Model supports the selected search API."
             }
         }
@@ -191,11 +191,11 @@ class Configuration(BaseModel):
         }
     )
     final_report_model: str = Field(
-        default="openai:gpt-4.1",
+        default="vllm:Qwen2.5-7B-Instruct",
         metadata={
             "x_oap_ui_config": {
                 "type": "text",
-                "default": "openai:gpt-4.1",
+                "default": "vllm:Qwen2.5-7B-Instruct",
                 "description": "Model for writing the final report from all research findings"
             }
         }

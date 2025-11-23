@@ -18,10 +18,12 @@ If you need to ask a question, follow these guidelines:
 - Use bullet points or numbered lists if appropriate for clarity. Make sure that this uses markdown formatting and will be rendered correctly if the string output is passed to a markdown renderer.
 - Don't ask for unnecessary information, or information that the user has already provided. If you can see that the user has already provided the information, do not ask for it again.
 
-Respond in valid JSON format with these exact keys:
+CRITICAL: You MUST respond in valid JSON format only, with no additional text before or after the JSON. Use these exact keys:
 "need_clarification": boolean,
 "question": "<question to ask the user to clarify the report scope>",
 "verification": "<verification message that we will start research>"
+
+Your response must be valid JSON that can be parsed directly. Do not include any markdown formatting, code blocks, or explanatory text.
 
 If you need to ask a clarifying question, return:
 "need_clarification": true,
@@ -74,6 +76,13 @@ Guidelines:
 - For academic or scientific queries, prefer linking directly to the original paper or official journal publication rather than survey papers or secondary summaries.
 - For people, try linking directly to their LinkedIn profile, or their personal website if they have one.
 - If the query is in a specific language, prioritize sources published in that language.
+
+CRITICAL: You MUST respond in valid JSON format only, with no additional text before or after the JSON. Use this exact format:
+{{
+  "research_brief": "<your detailed research question here>"
+}}
+
+Your response must be valid JSON that can be parsed directly. Do not include any markdown formatting, code blocks, or explanatory text.
 """
 
 lead_researcher_prompt = """You are a research supervisor. Your job is to conduct research by calling the "ConductResearch" tool. For context, today's date is {date}.

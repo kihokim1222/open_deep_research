@@ -35,16 +35,34 @@ uv sync
 uv pip install -r pyproject.toml
 ```
 
-3. Set up your `.env` file to customize the environment variables (for model selection, search tools, and other configuration settings):
+3. **For vLLM users**: If you want to use vLLM with Qwen2.5-7B-Instruct locally:
+# Install vLLM (optional, if not already installed)
+
+
+4. Set up your `.env` file to customize the environment variables:
 ```bash
-cp .env.example .env
+# Add vLLM configuration to .env file
+# vLLM Configuration (for local Qwen2.5-7B-Instruct)
+VLLM_BASE_URL=http://127.0.0.1:8000/v1
+VLLM_API_KEY=EMPTY
+VLLM_SERVED_MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+
+
+# Tavily Search API (required for web search)
+TAVILY_API_KEY=your_tavily_api_key_here
 ```
 
-4. Launch agent with the LangGraph server locally:
+5. **Important**: If you're using Python 3.12, update `langgraph.json`:
+```bash
+# The python_version in langgraph.json should match your Python version
+# Default is 3.11, but you can change it to 3.12 if needed
+```
+
+6. Launch agent with the LangGraph server locally:
 
 ```bash
 # Install dependencies and start the LangGraph server
-uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.11 langgraph dev --allow-blocking
+uvx --refresh --from "langgraph-cli[inmem]" --with-editable . --python 3.12 langgraph dev --allow-blocking
 ```
 
 This will open the LangGraph Studio UI in your browser.
@@ -63,14 +81,57 @@ Ask a question in the `messages` input field and click `Submit`. Select differen
 
 Open Deep Research supports a wide range of LLM providers via the [init_chat_model() API](https://python.langchain.com/docs/how_to/chat_models_universal_init/). It uses LLMs for a few different tasks. See the below model fields in the [configuration.py](https://github.com/langchain-ai/open_deep_research/blob/main/src/open_deep_research/configuration.py) file for more details. This can be accessed via the LangGraph Studio UI. 
 
-- **Summarization** (default: `openai:gpt-4.1-mini`): Summarizes search API results
-- **Research** (default: `openai:gpt-4.1`): Power the search agent
-- **Compression** (default: `openai:gpt-4.1`): Compresses research findings
-- **Final Report Model** (default: `openai:gpt-4.1`): Write the final report
+- **Summarization** (default: `vllm:Qwen2.5-7B-Instruct`): Summarizes search API results
+- **Research** (default: `vllm:Qwen2.5-7B-Instruct`): Power the search agent
+- **Compression** (default: `vllm:Qwen2.5-7B-Instruct`): Compresses research findings
+- **Final Report Model** (default: `vllm:Qwen2.5-7B-Instruct`): Write the final report
 
 > Note: the selected model will need to support [structured outputs](https://python.langchain.com/docs/integrations/chat/) and [tool calling](https://python.langchain.com/docs/how_to/tool_calling/).
 
 > Note: For OpenRouter: Follow [this guide](https://github.com/langchain-ai/open_deep_research/issues/75#issuecomment-2811472408) and for local models via Ollama  see [setup instructions](https://github.com/langchain-ai/open_deep_research/issues/65#issuecomment-2743586318).
+
+##### Using vLLM with Qwen2.5-7B-Instruct
+
+To use vLLM with Qwen2.5-7B-Instruct locally, you need to:
+
+1. **Install vLLM** (if not already installed):
+
+2. **Start your vLLM server**:
+```bash
+CUDA_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen2.5-7B-Instruct \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --max-model-len 32768 \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.9 \
+  --max-num-seqs 128 \
+  --enable-prefix-caching \
+  --enable-chunked-prefill \
+  --enable-auto-tool-choice \
+  --tool-call-parser hermes
+```
+
+> **Note**: The `--tensor-parallel-size` should be a divisor of the model's attention heads (28 for Qwen2.5-7B). Valid values are 1, 2, 4, 7, 14, 28.
+> 
+> **Note**: If you use `--served-model-name`, you need to update the model name in configuration to match (e.g., `vllm:qwen-7b-instruct` or `openai:qwen-7b-instruct`).
+
+3. **Set the environment variables** in your `.env` file:
+```bash
+# Add vLLM configuration to .env file
+# vLLM Configuration (for local Qwen2.5-7B-Instruct)
+VLLM_BASE_URL=http://127.0.0.1:8000/v1
+VLLM_API_KEY=EMPTY
+VLLM_SERVED_MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+
+
+# Tavily Search API (required for web search)
+TAVILY_API_KEY=your_tavily_api_key_here
+```
+
+The system will automatically:
+   - Detect vLLM models by the `vllm:` prefix or `VLLM_BASE_URL` environment variable
+   - Use the appropriate base URL for API calls
+   - Fall back to JSON parsing if structured output is not supported
 
 #### Search API :mag:
 

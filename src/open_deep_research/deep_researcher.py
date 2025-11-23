@@ -1,6 +1,7 @@
 """Main LangGraph implementation for the Deep Research agent."""
 
 import asyncio
+import logging
 from typing import Literal
 
 from langchain.chat_models import init_chat_model
@@ -43,18 +44,21 @@ from open_deep_research.utils import (
     anthropic_websearch_called,
     get_all_tools,
     get_api_key_for_model,
+    get_base_url_for_model,
     get_model_token_limit,
     get_notes_from_tool_calls,
     get_today_str,
     is_token_limit_exceeded,
+    normalize_model_name_for_langchain,
     openai_websearch_called,
+    parse_structured_output_fallback,
     remove_up_to_last_ai_message,
     think_tool,
 )
 
 # Initialize a configurable model that we will use throughout the agent
 configurable_model = init_chat_model(
-    configurable_fields=("model", "max_tokens", "api_key"),
+    configurable_fields=("model", "max_tokens", "api_key", "base_url"),
 )
 
 async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Command[Literal["write_research_brief", "__end__"]]:
@@ -78,12 +82,17 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
     
     # Step 2: Prepare the model for structured clarification analysis
     messages = state["messages"]
+    base_url = get_base_url_for_model(configurable.research_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.research_model)
     model_config = {
-        "model": configurable.research_model,
+        "model": normalized_model_name,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
+    if base_url:
+        model_config["base_url"] = base_url
     
     # Configure model with structured output and retry logic
     clarification_model = (
@@ -98,7 +107,28 @@ async def clarify_with_user(state: AgentState, config: RunnableConfig) -> Comman
         messages=get_buffer_string(messages), 
         date=get_today_str()
     )
-    response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
+    try:
+        response = await clarification_model.ainvoke([HumanMessage(content=prompt_content)])
+    except Exception as e:
+        # Fallback: If structured output fails, try to parse JSON from response
+        logging.warning(f"Structured output failed for clarification, attempting fallback: {e}")
+        fallback_response = await configurable_model.with_config(model_config).ainvoke(
+            [HumanMessage(content=prompt_content)]
+        )
+        parsed_response = parse_structured_output_fallback(
+            str(fallback_response.content),
+            ClarifyWithUser,
+            configurable.research_model
+        )
+        if parsed_response:
+            response = parsed_response
+        else:
+            # Last resort: create a default response
+            response = ClarifyWithUser(
+                need_clarification=False,
+                question="",
+                verification="I will now start the research based on the provided information."
+            )
     
     # Step 4: Route based on clarification analysis
     if response.need_clarification:
@@ -131,12 +161,17 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
     """
     # Step 1: Set up the research model for structured output
     configurable = Configuration.from_runnable_config(config)
+    base_url = get_base_url_for_model(configurable.research_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.research_model)
     research_model_config = {
-        "model": configurable.research_model,
+        "model": normalized_model_name,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
+    if base_url:
+        research_model_config["base_url"] = base_url
     
     # Configure model for structured research question generation
     research_model = (
@@ -151,7 +186,28 @@ async def write_research_brief(state: AgentState, config: RunnableConfig) -> Com
         messages=get_buffer_string(state.get("messages", [])),
         date=get_today_str()
     )
-    response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
+    try:
+        response = await research_model.ainvoke([HumanMessage(content=prompt_content)])
+    except Exception as e:
+        # Fallback: If structured output fails, try to parse JSON from response
+        logging.warning(f"Structured output failed for research brief, attempting fallback: {e}")
+        fallback_response = await configurable_model.with_config(research_model_config).ainvoke(
+            [HumanMessage(content=prompt_content)]
+        )
+        parsed_response = parse_structured_output_fallback(
+            str(fallback_response.content),
+            ResearchQuestion,
+            configurable.research_model
+        )
+        if parsed_response:
+            response = parsed_response
+        else:
+            # Last resort: create a default response from user messages
+            user_messages = state.get("messages", [])
+            last_user_message = user_messages[-1].content if user_messages else ""
+            response = ResearchQuestion(
+                research_brief=last_user_message if last_user_message else "Research the requested topic."
+            )
     
     # Step 3: Initialize supervisor with research brief and instructions
     supervisor_system_prompt = lead_researcher_prompt.format(
@@ -191,12 +247,17 @@ async def supervisor(state: SupervisorState, config: RunnableConfig) -> Command[
     """
     # Step 1: Configure the supervisor model with available tools
     configurable = Configuration.from_runnable_config(config)
+    base_url = get_base_url_for_model(configurable.research_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.research_model)
     research_model_config = {
-        "model": configurable.research_model,
+        "model": normalized_model_name,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
+    if base_url:
+        research_model_config["base_url"] = base_url
     
     # Available tools: research delegation, completion signaling, and strategic thinking
     lead_researcher_tools = [ConductResearch, ResearchComplete, think_tool]
@@ -389,12 +450,17 @@ async def researcher(state: ResearcherState, config: RunnableConfig) -> Command[
         )
     
     # Step 2: Configure the researcher model with tools
+    base_url = get_base_url_for_model(configurable.research_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.research_model)
     research_model_config = {
-        "model": configurable.research_model,
+        "model": normalized_model_name,
         "max_tokens": configurable.research_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.research_model, config),
         "tags": ["langsmith:nostream"]
     }
+    if base_url:
+        research_model_config["base_url"] = base_url
     
     # Prepare system prompt with MCP context if available
     researcher_prompt = research_system_prompt.format(
@@ -524,12 +590,18 @@ async def compress_research(state: ResearcherState, config: RunnableConfig):
     """
     # Step 1: Configure the compression model
     configurable = Configuration.from_runnable_config(config)
-    synthesizer_model = configurable_model.with_config({
-        "model": configurable.compression_model,
+    base_url = get_base_url_for_model(configurable.compression_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.compression_model)
+    synthesizer_config = {
+        "model": normalized_model_name,
         "max_tokens": configurable.compression_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.compression_model, config),
         "tags": ["langsmith:nostream"]
-    })
+    }
+    if base_url:
+        synthesizer_config["base_url"] = base_url
+    synthesizer_model = configurable_model.with_config(synthesizer_config)
     
     # Step 2: Prepare messages for compression
     researcher_messages = state.get("researcher_messages", [])
@@ -624,12 +696,17 @@ async def final_report_generation(state: AgentState, config: RunnableConfig):
     
     # Step 2: Configure the final report generation model
     configurable = Configuration.from_runnable_config(config)
+    base_url = get_base_url_for_model(configurable.final_report_model, config)
+    # Normalize model name for LangChain (vllm: -> openai:)
+    normalized_model_name = normalize_model_name_for_langchain(configurable.final_report_model)
     writer_model_config = {
-        "model": configurable.final_report_model,
+        "model": normalized_model_name,
         "max_tokens": configurable.final_report_model_max_tokens,
         "api_key": get_api_key_for_model(configurable.final_report_model, config),
         "tags": ["langsmith:nostream"]
     }
+    if base_url:
+        writer_model_config["base_url"] = base_url
     
     # Step 3: Attempt report generation with token limit retry logic
     max_retries = 3
