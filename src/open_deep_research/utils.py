@@ -1011,11 +1011,9 @@ MODEL_TOKEN_LIMITS = {
     "anthropic.claude-opus-4-1-20250805-v1:0": 200000,
     # vLLM models
     "vllm:Qwen2.5-7B-Instruct": 32768,
-    "vllm:qwen2.5-7b-instruct": 32768,
-    "vllm:qwen-7b-instruct": 8192,  # For custom served-model-name
-    "openai:Qwen2.5-7B-Instruct": 32768,  # For OpenAI-compatible API format
-    "openai:qwen2.5-7b-instruct": 32768,  # For OpenAI-compatible API format
-    "openai:qwen-7b-instruct": 8192,  # For custom served-model-name with OpenAI format
+    "vllm:Qwen/Qwen2.5-7B-Instruct": 32768,
+    "openai:Qwen2.5-7B-Instruct": 32768,
+    "openai:Qwen/Qwen2.5-7B-Instruct": 32768
 }
 
 def get_model_token_limit(model_string):

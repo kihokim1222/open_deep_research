@@ -45,7 +45,8 @@ uv pip install -r pyproject.toml
 # vLLM Configuration (for local Qwen2.5-7B-Instruct)
 VLLM_BASE_URL=http://127.0.0.1:8000/v1
 VLLM_API_KEY=EMPTY
-VLLM_SERVED_MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+RESEARCH_MODEL=vllm:Qwen2.5-7B-Instruct
+#VLLM_SERVED_MODEL_NAME= # for --served-model-name
 
 
 # Tavily Search API (required for web search)
@@ -121,7 +122,8 @@ CUDA_VISIBLE_DEVICES=0,1 vllm serve Qwen/Qwen2.5-7B-Instruct \
 # vLLM Configuration (for local Qwen2.5-7B-Instruct)
 VLLM_BASE_URL=http://127.0.0.1:8000/v1
 VLLM_API_KEY=EMPTY
-VLLM_SERVED_MODEL_NAME=Qwen/Qwen2.5-7B-Instruct
+RESEARCH_MODEL=vllm:Qwen2.5-7B-Instruct
+VLLM_SERVED_MODEL_NAME= # for --served-model-name
 
 
 # Tavily Search API (required for web search)
